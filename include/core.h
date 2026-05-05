@@ -17,7 +17,7 @@ constexpr char EMPTY_CELL  = '.';
 constexpr char BORDER_H    = '-';
 constexpr char BORDER_V    = '|';
 
-#define SERVER_IP "127.0.0.1"  // his machine changes this to your IP
+#define SERVER_IP "127.0.0.1"
 #define PORT 5555
 
 class Engine {
@@ -29,7 +29,6 @@ public:
 
     void run();
     void processInput();
-    void updatePhysics();
     void render();
     void drawGrid(const std::vector<Entity*>& entities);
     void drawHUD();
@@ -39,9 +38,7 @@ public:
     void stop()            { running = false; }
 
     int  getScore()  const { return score; }
-    int  getAmmo()   const { return ammo;  }
     void setScore(int s)   { score = s;    }
-    void setAmmo(int a)    { ammo  = a;    }
 
 private:
     Engine();
@@ -49,28 +46,19 @@ private:
 
     void connectToServer();
     void receiveLoop();
-    void sendPacket(const std::string& action, int x, int y);
+    void sendInput(const std::string& action);
+    void applyServerState(const std::string& state);
 
     SOCKET sock;
     std::thread recvThread;
     std::atomic<bool> connected;
     std::atomic<bool> gameStarted;
-    int myPlayerID = 0;
     std::string myRole = "";
+    int score = 0;
 
-    struct NetPlayer {
-        int x = 0, y = 0;
-        bool alive = true;
-    };
-    NetPlayer netPlayers[2];
-    int netScore = 0;
-
-    bool           running;
-    int            score;
-    int            ammo;
+    bool running;
 
     EntityManager* entityManager;
-    PhysicsEngine* physicsEngine;
 
     static Engine* instance;
 };

@@ -5,6 +5,7 @@
 #include "EntityFactory.h"
 #include "Player.h"
 #include "Enemy.h"
+#include "Projectile.h"
 #include <thread>
 #include <chrono>
 #include <iostream>
@@ -20,18 +21,15 @@ Engine* Engine::instance = nullptr;
 
 Engine::Engine()
     : running(true)
-    , score(0)
-    , ammo(0)
     , connected(false)
     , gameStarted(false)
+    , score(0)
     , sock(INVALID_SOCKET)
     , entityManager(new EntityManager())
-    , physicsEngine(new PhysicsEngine())
 {}
 
 Engine::~Engine() {
     delete entityManager;
-    delete physicsEngine;
     if (sock != INVALID_SOCKET) closesocket(sock);
     WSACleanup();
     instance = nullptr;
@@ -62,76 +60,99 @@ void Engine::connectToServer() {
     }
 
     connected = true;
-    std::cout << "[Network] Connected to server!\n";
+    std::cout << "[Network] Connected!\n";
 }
 
-void Engine::sendPacket(const std::string& action, int x, int y) {
+void Engine::sendInput(const std::string& action) {
     if (sock == INVALID_SOCKET || !connected) return;
-    std::string packet = std::to_string(myPlayerID) + ":" + action + ":"
-                       + std::to_string(x) + ":" + std::to_string(y);
+    std::string packet = myRole + ":" + action + "\n";
     send(sock, packet.c_str(), packet.size(), 0);
 }
 
+void Engine::applyServerState(const std::string& state) {
+    // Format: STATE:id:symbol:x:y:active;id:symbol:x:y:active:SCORE:N
+    // Split off SCORE first
+    std::string entitiesPart = state;
+    int scoreVal = score;
+
+    auto scorePos = state.find(":SCORE:");
+    if (scorePos != std::string::npos) {
+        entitiesPart = state.substr(0, scorePos);
+        scoreVal = stoi(state.substr(scorePos + 7));
+        score = scoreVal;
+    }
+
+    // Remove "STATE:" prefix
+    if (entitiesPart.substr(0, 6) == "STATE:")
+        entitiesPart = entitiesPart.substr(6);
+
+    // Clear and rebuild entities
+    entityManager->clear();
+
+    std::stringstream ss(entitiesPart);
+    std::string token;
+    while (getline(ss, token, ';')) {
+        if (token.empty()) continue;
+        std::stringstream es(token);
+        std::string idStr, symbol, xStr, yStr, activeStr;
+        getline(es, idStr,     ':');
+        getline(es, symbol,    ':');
+        getline(es, xStr,      ':');
+        getline(es, yStr,      ':');
+        getline(es, activeStr, ':');
+
+        int id = stoi(idStr);
+        int x  = stoi(xStr);
+        int y  = stoi(yStr);
+
+        std::unique_ptr<Entity> e;
+        if      (symbol == "V") e = EntityFactory::createEntity("Player",     id, {x, y}, "Top");
+        else if (symbol == "M") e = EntityFactory::createEntity("Player",     id, {x, y}, "Bottom");
+        else if (symbol == "X") e = EntityFactory::createEntity("Enemy",      id, {x, y});
+        else if (symbol == "|") e = EntityFactory::createEntity("Projectile", id, {x, y});
+
+        if (e) {
+            if (symbol == "V") static_cast<Player*>(e.get())->setAsTopPlayer(true);
+            if (symbol == "M") static_cast<Player*>(e.get())->setAsTopPlayer(false);
+            entityManager->addEntity(std::move(e));
+        }
+    }
+}
+
 void Engine::receiveLoop() {
-    char buffer[2048];
+    char buffer[4096];
+    std::string leftover;
+
     while (running && connected) {
         memset(buffer, 0, sizeof(buffer));
-        int bytesReceived = recv(sock, buffer, sizeof(buffer), 0);
-        if (bytesReceived <= 0) {
+        int bytes = recv(sock, buffer, sizeof(buffer), 0);
+        if (bytes <= 0) {
             connected = false;
+            running   = false;
             break;
         }
 
-        std::string msg(buffer, bytesReceived);
+        leftover += std::string(buffer, bytes);
 
-        if (msg.substr(0, 5) == "ROLE:") {
-            myPlayerID = msg[5] - '0';
-            myRole     = msg.substr(7);
-        }
-        else if (msg == "SERVER:START") {
-            gameStarted = true;
-        }
-        else if (msg.substr(0, 11) == "WORLDSTATE:") {
-            std::string body = msg.substr(11);
-            std::stringstream ss(body);
-            std::string scoreStr, p1Block, p2Block;
-            getline(ss, scoreStr, '|');
-            getline(ss, p1Block,  '|');
-            getline(ss, p2Block,  '|');
+        // Process complete lines
+        size_t pos;
+        while ((pos = leftover.find('\n')) != std::string::npos) {
+            std::string msg = leftover.substr(0, pos);
+            leftover = leftover.substr(pos + 1);
 
-            netScore = stoi(scoreStr);
-            score    = netScore;
-
-            auto parseBlock = [&](const std::string& block, int idx) {
-                std::stringstream bs(block);
-                std::string label, id, role, x, y, alive;
-                getline(bs, label, ':');
-                getline(bs, id,    ':');
-                getline(bs, role,  ':');
-                getline(bs, x,     ':');
-                getline(bs, y,     ':');
-                getline(bs, alive, ':');
-                netPlayers[idx].x     = stoi(x);
-                netPlayers[idx].y     = stoi(y);
-                netPlayers[idx].alive = (alive == "1");
-            };
-
-            parseBlock(p1Block, 0);
-            parseBlock(p2Block, 1);
-
-            int idx = 0;
-            for (auto& e : entityManager->getEntities()) {
-                if (auto* p = dynamic_cast<Player*>(e.get())) {
-                    if (idx < 2) {
-                        p->setPosition({netPlayers[idx].x, netPlayers[idx].y});
-                        if (!netPlayers[idx].alive) p->setActive(false);
-                        idx++;
-                    }
-                }
+            if (msg.substr(0, 5) == "ROLE:") {
+                myRole = msg.substr(5);
+                std::cout << "You are " << myRole << "\n";
             }
-        }
-        else if (msg.substr(0, 19) == "SERVER:PLAYER_LEFT:") {
-            running = false;
+            else if (msg == "START") {
+                gameStarted = true;
+            }
+            else if (msg.substr(0, 6) == "STATE:") {
+                applyServerState(msg);
+            }
+            else if (msg.substr(0, 8) == "GAMEOVER") {
+                running = false;
+            }
         }
     }
 }
@@ -174,7 +195,6 @@ void Engine::drawGrid(const std::vector<Entity*>& entities) {
 
 void Engine::drawHUD() {
     std::cout << "\nhhhh bro it's too easy!"
-              << "  |  Player: " << myPlayerID
               << "  |  Role: " << myRole
               << "  |  Score: " << score << "\n\n";
     std::cout << "P1 [V]: [A] Left  [D] Right  [S] Shoot\n";
@@ -193,112 +213,51 @@ void Engine::render() {
 }
 
 void Engine::processInput() {
-    if (_kbhit()) {
-        char key = static_cast<char>(toupper(_getch()));
+    if (!_kbhit()) return;
+    char key = static_cast<char>(toupper(_getch()));
 
-        Player* top = nullptr;
-        Player* bottom = nullptr;
-        for (auto& e : entityManager->getEntities()) {
-            if (auto* p = dynamic_cast<Player*>(e.get())) {
-                if (p->isTop()) top = p;
-                else bottom = p;
-            }
-        }
-
-        if (connected) {
-            switch (key) {
-                case 'A': if (myRole == "TOP")    sendPacket("SLIDE", -1, 0); break;
-                case 'D': if (myRole == "TOP")    sendPacket("SLIDE",  1, 0); break;
-                case 'S': if (myRole == "TOP")    sendPacket("SHOOT",  0, 0); break;
-                case 'H': if (myRole == "BOTTOM") sendPacket("SLIDE", -1, 0); break;
-                case 'L': if (myRole == "BOTTOM") sendPacket("SLIDE",  1, 0); break;
-                case ' ': if (myRole == "BOTTOM") sendPacket("JUMP",   0, 1); break;
-                case 'Q': case 27: running = false; break;
-            }
-        } else {
-            switch (key) {
-                case 'A': if (top) top->move({-1, 0}); break;
-                case 'D': if (top) top->move({1, 0});  break;
-                case 'S':
-                    if (top) {
-                        std::unique_ptr<Entity> proj = top->shoot();
-                        if (proj) entityManager->addEntity(std::move(proj));
-                    }
-                    break;
-                case 'H': if (bottom) bottom->move({-1, 0}); break;
-                case 'L': if (bottom) bottom->move({1, 0});  break;
-                case ' ':
-                    if (bottom) bottom->setVelocity({0, -5});
-                    break;
-                case 'Q': case 27: running = false; break;
-            }
-        }
-    }
-}
-
-void Engine::updatePhysics() {
-    for (auto& e : entityManager->getEntities()) {
-        if (e && e->isActive())
-            e->move({0, 0});
-    }
-    physicsEngine->detectAndResolveCollisions(entityManager->getEntities());
-
-    for (auto& e : entityManager->getEntities()) {
-        if (auto* p = dynamic_cast<Player*>(e.get())) {
-            if (!p->isActive()) {
-                if (connected) sendPacket("DEATH", p->isTop() ? 1 : 2, 0);
-                running = false;
-            }
-        }
-    }
-
-    bool hasEnemy = false;
-    for (auto& e : entityManager->getEntities()) {
-        if (e && e->isActive() && e->getType() == EntityType::INSECT)
-            hasEnemy = true;
-    }
-    if (!hasEnemy) {
-        score++;
-        entityManager->addEntity(EntityFactory::createEntity("Enemy", rand() % 1000, {rand() % 38 + 1, 1}));
+    switch (key) {
+        case 'A': if (myRole == "P1") sendInput("MOVE_LEFT");  break;
+        case 'D': if (myRole == "P1") sendInput("MOVE_RIGHT"); break;
+        case 'S': if (myRole == "P1") sendInput("SHOOT");      break;
+        case 'H': if (myRole == "P2") sendInput("MOVE_LEFT");  break;
+        case 'L': if (myRole == "P2") sendInput("MOVE_RIGHT"); break;
+        case ' ': if (myRole == "P2") sendInput("JUMP");       break;
+        case 'Q': case 27: running = false; break;
     }
 }
 
 void Engine::run() {
-    srand(time(nullptr));
-
     connectToServer();
 
     if (connected)
         recvThread = std::thread(&Engine::receiveLoop, this);
 
-    auto p1 = EntityFactory::createEntity("Player", 1, {20, 0}, "Top");
-    if (p1) {
-        static_cast<Player*>(p1.get())->setAsTopPlayer(true);
-        entityManager->addEntity(std::move(p1));
-    }
-
-    auto p2 = EntityFactory::createEntity("Player", 2, {20, 19}, "Bottom");
-    if (p2) {
-        static_cast<Player*>(p2.get())->setAsTopPlayer(false);
-        entityManager->addEntity(std::move(p2));
-    }
-
-    entityManager->addEntity(EntityFactory::createEntity("Enemy", 3, {rand() % 38 + 1, 1}));
-
     if (connected) {
         std::cout << "Waiting for other player...\n";
-        while (connected && !gameStarted) {
+        while (connected && !gameStarted)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::cout << "GO! You are " << myRole << "\n";
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    } else {
+        // Offline fallback — spawn entities locally
+        auto p1 = EntityFactory::createEntity("Player", 1, {20, 0}, "Top");
+        if (p1) {
+            static_cast<Player*>(p1.get())->setAsTopPlayer(true);
+            entityManager->addEntity(std::move(p1));
         }
-        std::cout << "Player " << myPlayerID << " | Role: " << myRole << " | GO!\n";
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto p2 = EntityFactory::createEntity("Player", 2, {20, 19}, "Bottom");
+        if (p2) {
+            static_cast<Player*>(p2.get())->setAsTopPlayer(false);
+            entityManager->addEntity(std::move(p2));
+        }
+        entityManager->addEntity(EntityFactory::createEntity("Enemy", 3, {20, 1}));
     }
 
     while (running) {
         processInput();
-        updatePhysics();
         render();
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     if (recvThread.joinable())

@@ -6,125 +6,202 @@
 #include <mutex>
 #include <string>
 #include <sstream>
+#include <chrono>
+#include "Entity.h"
+#include "EntityManager.h"
+#include "PhysicsEngine.h"
+#include "EntityFactory.h"
+#include "Player.h"
+#include "Enemy.h"
+#include <cstdlib>
+#include <ctime>
 #pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
 
 #define PORT 5555
 #define MAX_CLIENTS 2
+#define GRID_WIDTH 40
+#define GRID_HEIGHT 20
 
-struct Player {
+struct ClientInfo {
     SOCKET socket;
     int id;
     string role;
-    int x, y;
-    bool alive;
     bool connected;
 };
 
-int score = 0;
-Player players[2];
-int playerCount = 0;
+ClientInfo clients[2];
+int clientCount = 0;
 mutex clientMutex;
+int score = 0;
 
+// ── Send/Broadcast ─────────────────────────────────────────────
 void sendToClient(SOCKET sock, const string& msg) {
-    send(sock, msg.c_str(), msg.size(), 0);
+    string packet = msg + "\n";
+    send(sock, packet.c_str(), packet.size(), 0);
 }
 
 void broadcast(const string& msg) {
-    lock_guard<mutex> lock(clientMutex);
     for (int i = 0; i < 2; i++)
-        if (players[i].connected)
-            sendToClient(players[i].socket, msg);
+        if (clients[i].connected)
+            sendToClient(clients[i].socket, msg);
 }
 
-string serializeAll() {
-    string state = "WORLDSTATE:" + to_string(score);
-    for (int i = 0; i < 2; i++) {
-        state += "|P" + to_string(i + 1) + ":"
-               + to_string(players[i].id)   + ":"
-               + players[i].role            + ":"
-               + to_string(players[i].x)   + ":"
-               + to_string(players[i].y)   + ":"
-               + (players[i].alive ? "1" : "0");
+// ── Game State ─────────────────────────────────────────────────
+EntityManager* entityManager = nullptr;
+PhysicsEngine* physicsEngine = nullptr;
+
+void initGame() {
+    entityManager = new EntityManager();
+    physicsEngine = new PhysicsEngine();
+
+    auto p1 = EntityFactory::createEntity("Player", 1, {20, 0}, "Top");
+    if (p1) {
+        static_cast<Player*>(p1.get())->setAsTopPlayer(true);
+        entityManager->addEntity(std::move(p1));
     }
+
+    auto p2 = EntityFactory::createEntity("Player", 2, {20, 19}, "Bottom");
+    if (p2) {
+        static_cast<Player*>(p2.get())->setAsTopPlayer(false);
+        entityManager->addEntity(std::move(p2));
+    }
+
+    srand(time(nullptr));
+    entityManager->addEntity(EntityFactory::createEntity("Enemy", 3, {rand() % 38 + 1, 1}));
+}
+
+string serializeWorld() {
+    string state = "STATE:";
+    bool first = true;
+    for (auto& e : entityManager->getEntities()) {
+        if (!e || !e->isActive()) continue;
+        if (!first) state += ";";
+        first = false;
+        Vec2 pos = e->getPosition();
+        state += to_string(e->getId()) + ":"
+               + e->display() + ":"
+               + to_string(pos.x) + ":"
+               + to_string(pos.y) + ":"
+               + "1";
+    }
+    state += ":SCORE:" + to_string(score);
     return state;
 }
 
-void broadcastWorldState() {
-    string snapshot = serializeAll();
-    for (int i = 0; i < 2; i++)
-        if (players[i].connected)
-            sendToClient(players[i].socket, snapshot);
-}
+bool gameRunning = false;
 
-void handlePacket(const string& packet, int playerIndex) {
+void handleInput(const string& packet) {
+    // Format: P1:MOVE_LEFT or P2:JUMP etc
     stringstream ss(packet);
-    string idStr, action, xStr, yStr;
-
-    getline(ss, idStr, ':');
+    string who, action;
+    getline(ss, who, ':');
     getline(ss, action, ':');
-    getline(ss, xStr, ':');
-    getline(ss, yStr, ':');
 
-    int x = xStr.empty() ? 0 : stoi(xStr);
-    int y = yStr.empty() ? 0 : stoi(yStr);
+    Player* top = nullptr;
+    Player* bottom = nullptr;
+    for (auto& e : entityManager->getEntities()) {
+        if (auto* p = dynamic_cast<Player*>(e.get())) {
+            if (p->isTop()) top = p;
+            else bottom = p;
+        }
+    }
 
-    {
-        lock_guard<mutex> lock(clientMutex);
-
-        if (action == "SLIDE") {
-            players[playerIndex].x += x;
-            if (players[playerIndex].x < 0)  players[playerIndex].x = 0;
-            if (players[playerIndex].x > 39) players[playerIndex].x = 39;
+    if (who == "P1" && top) {
+        if (action == "MOVE_LEFT")  top->move({-1, 0});
+        if (action == "MOVE_RIGHT") top->move({1, 0});
+        if (action == "SHOOT") {
+            auto proj = top->shoot();
+            if (proj) entityManager->addEntity(std::move(proj));
         }
-        else if (action == "JUMP") {
-            players[playerIndex].y -= 3;
-            if (players[playerIndex].y < 0) players[playerIndex].y = 0;
-        }
-        else if (action == "SHOOT") {
-            cout << "[P" << playerIndex + 1 << "] SHOOT!\n";
-        }
-        else if (action == "SCORED") {
-            score++;
-        }
-        else if (action == "DEATH") {
-            int victimID = x;
-            if (victimID >= 1 && victimID <= 2) {
-                players[victimID - 1].alive = false;
-                score++;
-                cout << "[AUTH] Player " << victimID << " died. Score: " << score << "\n";
-            }
-        }
-
-        broadcastWorldState();
+    }
+    if (who == "P2" && bottom) {
+        if (action == "MOVE_LEFT")  bottom->move({-1, 0});
+        if (action == "MOVE_RIGHT") bottom->move({1, 0});
+        if (action == "JUMP")       bottom->setVelocity({0, -5});
     }
 }
 
-void handleClient(int playerIndex) {
-    SOCKET sock = players[playerIndex].socket;
-    int playerID = players[playerIndex].id;
+// ── Receive thread per client ──────────────────────────────────
+void receiveFromClient(int idx) {
     char buffer[1024];
-
-    while (true) {
+    while (gameRunning && clients[idx].connected) {
         memset(buffer, 0, sizeof(buffer));
-        int bytesReceived = recv(sock, buffer, sizeof(buffer), 0);
-        if (bytesReceived <= 0) {
-            cout << "Player " << playerID << " disconnected.\n";
-            {
-                lock_guard<mutex> lock(clientMutex);
-                players[playerIndex].connected = false;
-            }
-            broadcast("SERVER:PLAYER_LEFT:" + to_string(playerID));
-            closesocket(sock);
+        int bytes = recv(clients[idx].socket, buffer, sizeof(buffer), 0);
+        if (bytes <= 0) {
+            cout << "Player " << clients[idx].id << " disconnected.\n";
+            clients[idx].connected = false;
+            broadcast("GAMEOVER:DISCONNECT");
+            gameRunning = false;
             break;
         }
-        string packet(buffer, bytesReceived);
-        cout << "[P" << playerID << "] " << packet << "\n";
-        handlePacket(packet, playerIndex);
+        string packet(buffer, bytes);
+        // remove newline
+        if (!packet.empty() && packet.back() == '\n')
+            packet.pop_back();
+        cout << "[P" << clients[idx].id << "] " << packet << "\n";
+        lock_guard<mutex> lock(clientMutex);
+        handleInput(packet);
     }
 }
 
+// ── Server game loop ───────────────────────────────────────────
+void gameLoop() {
+    initGame();
+    gameRunning = true;
+
+    // Start receive threads
+    thread t1(receiveFromClient, 0);
+    thread t2(receiveFromClient, 1);
+
+    while (gameRunning) {
+        {
+            lock_guard<mutex> lock(clientMutex);
+
+            // Update physics
+            for (auto& e : entityManager->getEntities())
+                if (e && e->isActive()) e->move({0, 0});
+
+            physicsEngine->detectAndResolveCollisions(entityManager->getEntities());
+
+            // Check player death
+            for (auto& e : entityManager->getEntities()) {
+                if (auto* p = dynamic_cast<Player*>(e.get())) {
+                    if (!p->isActive()) {
+                        broadcast("GAMEOVER:LOSE");
+                        gameRunning = false;
+                    }
+                }
+            }
+
+            // Respawn enemy
+            bool hasEnemy = false;
+            for (auto& e : entityManager->getEntities())
+                if (e && e->isActive() && e->getType() == EntityType::INSECT)
+                    hasEnemy = true;
+
+            if (!hasEnemy) {
+                score++;
+                entityManager->addEntity(EntityFactory::createEntity(
+                    "Enemy", rand() % 1000, {rand() % 38 + 1, 1}));
+            }
+
+            // Broadcast world state
+            broadcast(serializeWorld());
+        }
+
+        this_thread::sleep_for(chrono::milliseconds(150));
+    }
+
+    if (t1.joinable()) t1.join();
+    if (t2.joinable()) t2.join();
+
+    delete entityManager;
+    delete physicsEngine;
+}
+
+// ── Main ───────────────────────────────────────────────────────
 int main() {
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -141,44 +218,31 @@ int main() {
     cout << "Server listening on port " << PORT << "...\n";
     cout << "Waiting for 2 players...\n";
 
-    while (playerCount < 2) {
+    while (clientCount < 2) {
         SOCKET clientSocket = accept(serverSocket, nullptr, nullptr);
         if (clientSocket == INVALID_SOCKET) continue;
 
-        lock_guard<mutex> lock(clientMutex);
+        clients[clientCount].socket    = clientSocket;
+        clients[clientCount].id        = clientCount + 1;
+        clients[clientCount].connected = true;
+        clients[clientCount].role      = (clientCount == 0) ? "P1" : "P2";
 
-        players[playerCount].socket    = clientSocket;
-        players[playerCount].id        = playerCount + 1;
-        players[playerCount].connected = true;
-        players[playerCount].alive     = true;
-        players[playerCount].x         = 20;
-        players[playerCount].y         = (playerCount == 0) ? 0 : 19;
-
-        if (playerCount == 0) {
-            players[playerCount].role = "TOP";
-            sendToClient(clientSocket, "ROLE:1:TOP");
-            cout << "Player 1 connected -> Role: TOP\n";
+        if (clientCount == 0) {
+            sendToClient(clientSocket, "ROLE:P1");
+            cout << "Player 1 connected -> P1\n";
         } else {
-            players[playerCount].role = "BOTTOM";
-            sendToClient(clientSocket, "ROLE:2:BOTTOM");
-            cout << "Player 2 connected -> Role: BOTTOM\n";
+            sendToClient(clientSocket, "ROLE:P2");
+            cout << "Player 2 connected -> P2\n";
+            // Send START to both
+            sendToClient(clients[0].socket, "START");
+            sendToClient(clients[1].socket, "START");
+            cout << "Both connected! Starting game...\n";
         }
 
-        playerCount++;
-
-        if (playerCount == 2) {
-            for (int i = 0; i < 2; i++)
-                sendToClient(players[i].socket, "SERVER:START");
-            broadcastWorldState();
-            cout << "Both players connected! Game starting...\n";
-        }
+        clientCount++;
     }
 
-    thread t1(handleClient, 0);
-    thread t2(handleClient, 1);
-
-    t1.join();
-    t2.join();
+    gameLoop();
 
     WSACleanup();
     return 0;
