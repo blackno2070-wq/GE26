@@ -26,19 +26,19 @@ public:
     std::unique_ptr<Entity> shoot();
 
     // Score
-    int getScore() const { return score; }
-    void addScore(int pts) { score += pts; }
+    int  getScore() const   { return score; }
+    void addScore(int pts)  { score += pts; }
 
     // Lives
-    int getLives() const { return lives; }
-    void loseLife() { lives--; if (lives <= 0) setActive(false); }
+    int  getLives() const   { return lives; }
+    void loseLife()         { lives--; if (lives <= 0) setActive(false); }
 
     // Role
-    bool isTop() const { return isTopPlayer; }
-    void setAsTopPlayer(bool val) { 
-    isTopPlayer = val; 
-    type = val ? EntityType::TOP_PLAYER : EntityType::BOTTOM_PLAYER;
-}
+    bool isTop() const      { return isTopPlayer; }
+    void setAsTopPlayer(bool val) {
+        isTopPlayer = val;
+        type = val ? EntityType::TOP_PLAYER : EntityType::BOTTOM_PLAYER;
+    }
 
     // Username
     const std::string& getUsername() const { return username; }

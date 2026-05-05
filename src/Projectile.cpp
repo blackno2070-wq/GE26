@@ -3,14 +3,14 @@
 #include <sstream>
 
 Projectile::Projectile(int id, Vec2 pos, Vec2 dir, int dmg)
-    : Entity(EntityType::PROJECTILE, pos), damage(dmg) {
+    : Entity(EntityType::PROJECTILE, pos, id), damage(dmg) {
     velocity = dir;
 }
 
 void Projectile::move(Vec2 dir) {
     (void)dir;
-    position.y += 3;  
-    clampPosition();
+    position.y += 1;   // moves one cell down per tick toward the floor
+    clampPosition();   // deactivates itself if it reaches y=19
 }
 
 void Projectile::onCollision(Entity* other) {

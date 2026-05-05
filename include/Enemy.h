@@ -5,7 +5,7 @@ class Enemy : public Entity {
 public:
     Enemy(int id, Vec2 pos);
 
-    void move(Vec2 dir) override;
+    // move() is inherited from Entity — uses correct INSECT drift logic
     void onCollision(Entity* other) override;
 
     virtual std::string serialize() const override;

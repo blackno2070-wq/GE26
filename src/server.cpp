@@ -21,22 +21,22 @@ using namespace std;
 
 #define PORT 5555
 #define MAX_CLIENTS 2
-#define GRID_WIDTH 40
+#define GRID_WIDTH  40
 #define GRID_HEIGHT 20
 
 struct ClientInfo {
     SOCKET socket;
-    int id;
+    int    id;
     string role;
-    bool connected;
+    bool   connected;
 };
 
 ClientInfo clients[2];
-int clientCount = 0;
-mutex clientMutex;
-int score = 0;
+int        clientCount = 0;
+mutex      clientMutex;
+int        score = 0;
 
-// ── Send/Broadcast ─────────────────────────────────────────────
+// ── Send / Broadcast ───────────────────────────────────────────
 void sendToClient(SOCKET sock, const string& msg) {
     string packet = msg + "\n";
     send(sock, packet.c_str(), packet.size(), 0);
@@ -51,6 +51,7 @@ void broadcast(const string& msg) {
 // ── Game State ─────────────────────────────────────────────────
 EntityManager* entityManager = nullptr;
 PhysicsEngine* physicsEngine = nullptr;
+bool           gameRunning   = false;
 
 void initGame() {
     entityManager = new EntityManager();
@@ -72,45 +73,48 @@ void initGame() {
     entityManager->addEntity(EntityFactory::createEntity("Enemy", 3, {rand() % 38 + 1, 1}));
 }
 
+// Builds the STATE packet the client's applyServerState() expects:
+// STATE:id:symbol:x:y:1;id:symbol:x:y:1:SCORE:N
+// Locks clientMutex internally — must be called OUTSIDE any clientMutex lock.
 string serializeWorld() {
     string state = "STATE:";
     bool first = true;
+    lock_guard<mutex> lock(clientMutex);
     for (auto& e : entityManager->getEntities()) {
         if (!e || !e->isActive()) continue;
         if (!first) state += ";";
         first = false;
         Vec2 pos = e->getPosition();
         state += to_string(e->getId()) + ":"
-               + e->display() + ":"
-               + to_string(pos.x) + ":"
-               + to_string(pos.y) + ":"
+               + e->display()          + ":"
+               + to_string(pos.x)      + ":"
+               + to_string(pos.y)      + ":"
                + "1";
     }
     state += ":SCORE:" + to_string(score);
     return state;
 }
 
-bool gameRunning = false;
-
+// ── Input Handler ──────────────────────────────────────────────
+// Called from receive threads while clientMutex is already held.
 void handleInput(const string& packet) {
-    // Format: P1:MOVE_LEFT or P2:JUMP etc
     stringstream ss(packet);
     string who, action;
-    getline(ss, who, ':');
+    getline(ss, who,    ':');
     getline(ss, action, ':');
 
-    Player* top = nullptr;
+    Player* top    = nullptr;
     Player* bottom = nullptr;
     for (auto& e : entityManager->getEntities()) {
         if (auto* p = dynamic_cast<Player*>(e.get())) {
-            if (p->isTop()) top = p;
-            else bottom = p;
+            if (p->isTop()) top    = p;
+            else            bottom = p;
         }
     }
 
     if (who == "P1" && top) {
         if (action == "MOVE_LEFT")  top->move({-1, 0});
-        if (action == "MOVE_RIGHT") top->move({1, 0});
+        if (action == "MOVE_RIGHT") top->move({ 1, 0});
         if (action == "SHOOT") {
             auto proj = top->shoot();
             if (proj) entityManager->addEntity(std::move(proj));
@@ -118,12 +122,12 @@ void handleInput(const string& packet) {
     }
     if (who == "P2" && bottom) {
         if (action == "MOVE_LEFT")  bottom->move({-1, 0});
-        if (action == "MOVE_RIGHT") bottom->move({1, 0});
+        if (action == "MOVE_RIGHT") bottom->move({ 1, 0});
         if (action == "JUMP")       bottom->setVelocity({0, -5});
     }
 }
 
-// ── Receive thread per client ──────────────────────────────────
+// ── Per-client receive thread ──────────────────────────────────
 void receiveFromClient(int idx) {
     char buffer[1024];
     while (gameRunning && clients[idx].connected) {
@@ -137,7 +141,6 @@ void receiveFromClient(int idx) {
             break;
         }
         string packet(buffer, bytes);
-        // remove newline
         if (!packet.empty() && packet.back() == '\n')
             packet.pop_back();
         cout << "[P" << clients[idx].id << "] " << packet << "\n";
@@ -151,7 +154,6 @@ void gameLoop() {
     initGame();
     gameRunning = true;
 
-    // Start receive threads
     thread t1(receiveFromClient, 0);
     thread t2(receiveFromClient, 1);
 
@@ -159,13 +161,10 @@ void gameLoop() {
         {
             lock_guard<mutex> lock(clientMutex);
 
-            // Update physics
-            for (auto& e : entityManager->getEntities())
-                if (e && e->isActive()) e->move({0, 0});
+            // Move all entities + detect/resolve collisions + remove inactive
+            entityManager->updateAll(*physicsEngine);
 
-            physicsEngine->detectAndResolveCollisions(entityManager->getEntities());
-
-            // Check player death
+            // Check if any player died
             for (auto& e : entityManager->getEntities()) {
                 if (auto* p = dynamic_cast<Player*>(e.get())) {
                     if (!p->isActive()) {
@@ -175,7 +174,7 @@ void gameLoop() {
                 }
             }
 
-            // Respawn enemy
+            // Respawn an enemy when all insects are dead — increment score
             bool hasEnemy = false;
             for (auto& e : entityManager->getEntities())
                 if (e && e->isActive() && e->getType() == EntityType::INSECT)
@@ -184,12 +183,11 @@ void gameLoop() {
             if (!hasEnemy) {
                 score++;
                 entityManager->addEntity(EntityFactory::createEntity(
-                    "Enemy", rand() % 1000, {rand() % 38 + 1, 1}));
+                    "Enemy", rand() % 1000 + 10, {rand() % 38 + 1, 1}));
             }
-
-            // Broadcast world state
-            broadcast(serializeWorld());
         }
+        // Broadcast OUTSIDE the lock — serializeWorld() takes its own lock
+        broadcast(serializeWorld());
 
         this_thread::sleep_for(chrono::milliseconds(150));
     }
@@ -233,7 +231,6 @@ int main() {
         } else {
             sendToClient(clientSocket, "ROLE:P2");
             cout << "Player 2 connected -> P2\n";
-            // Send START to both
             sendToClient(clients[0].socket, "START");
             sendToClient(clients[1].socket, "START");
             cout << "Both connected! Starting game...\n";

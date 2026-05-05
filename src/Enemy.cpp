@@ -2,16 +2,13 @@
 #include <cstdlib>
 
 Enemy::Enemy(int id, Vec2 pos)
-    : Entity(EntityType::INSECT, pos) {
+    : Entity(EntityType::INSECT, pos, id) {
     setHealth(1);
 }
 
-void Enemy::move(Vec2 dir) {
-    (void)dir;
-    velocity = {(std::rand() % 3) - 1, 2};  
-    position = position + velocity;
-    clampPosition();
-}
+// move() is NOT overridden here.
+// Entity::move() handles INSECT type: drifts left every tick,
+// randomly shifts vertically — correct behavior, no need to duplicate.
 
 void Enemy::onCollision(Entity* other) {
     if (!other || !other->isActive()) return;

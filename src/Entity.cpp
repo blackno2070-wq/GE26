@@ -14,6 +14,16 @@ Entity::Entity(EntityType type, Vec2 startPos)
     , id(nextId++)
 {}
 
+// Used by factory when recreating entities from network data — preserves server's ID
+Entity::Entity(EntityType type, Vec2 startPos, int explicitId)
+    : type(type)
+    , position(startPos)
+    , velocity({0, 0})
+    , active(true)
+    , health(1)
+    , id(explicitId)
+{}
+
 char Entity::display() const {
     switch (type) {
         case EntityType::TOP_PLAYER:    return 'V';
@@ -39,7 +49,10 @@ void Entity::move(Vec2 dir) {
             break;
         case EntityType::BOTTOM_PLAYER:
             velocity.x = dir.x;
-            velocity.y += GRAVITY;
+            if (position.y < 19)
+                velocity.y += GRAVITY;
+            else
+                velocity.y = 0;
             position = position + velocity;
             break;
         case EntityType::INSECT:
@@ -95,22 +108,16 @@ void Entity::onCollision(Entity* other) {
 }
 
 int Entity::calculateArea() const {
-    switch (type) {
-        case EntityType::TOP_PLAYER:    return 1;
-        case EntityType::BOTTOM_PLAYER: return 1;
-        case EntityType::INSECT:        return 1;
-        case EntityType::PROJECTILE:    return 1;
-        default:                        return 1;
-    }
+    return 1;
 }
 
 void Entity::deserialize(const std::string& data) {
     std::stringstream ss(data);
     std::string idStr, typeChar, xStr, yStr, activeStr;
-    std::getline(ss, idStr, ':');
-    std::getline(ss, typeChar, ':');
-    std::getline(ss, xStr, ':');
-    std::getline(ss, yStr, ':');
+    std::getline(ss, idStr,     ':');
+    std::getline(ss, typeChar,  ':');
+    std::getline(ss, xStr,      ':');
+    std::getline(ss, yStr,      ':');
     std::getline(ss, activeStr, ':');
     position.x = std::stoi(xStr);
     position.y = std::stoi(yStr);

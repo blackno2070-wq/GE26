@@ -1,23 +1,21 @@
 #include "PhysicsEngine.h"
 #include "Entity.h"
 #include <cstdlib>
- 
-// [ GAMEPLAY TASK 1 — Eman ]
- 
+
 void PhysicsEngine::init()     {}
 void PhysicsEngine::shutdown() {}
- 
-// Moves every active entity one step by its velocity
+
+// Calls each entity's own move() — which handles position, velocity, and clamping.
+// We do NOT manually add velocity here to avoid double-movement.
 void PhysicsEngine::updatePositions(std::vector<std::unique_ptr<Entity>>& entities)
 {
     for (auto& e : entities) {
         if (!e || !e->isActive()) continue;
-        Vec2 newPos = e->getPosition() + e->getVelocity();
-        e->setPosition(newPos);
+        e->move({0, 0});
     }
 }
- 
-// Checks every pair of active entities for overlap, triggers onCollision() if they touch
+
+// Checks every active pair for overlap (Manhattan distance <= 1), fires onCollision()
 void PhysicsEngine::detectAndResolveCollisions(const std::vector<std::unique_ptr<Entity>>& entities)
 {
     int n = static_cast<int>(entities.size());

@@ -3,10 +3,11 @@
 #include <sstream>
 
 Player::Player(int id, Vec2 pos, const std::string& name)
-    : Entity(EntityType::BOTTOM_PLAYER, pos), username(name) {
-    setHealth(1);
-    lives = 1;
+    : Entity(EntityType::BOTTOM_PLAYER, pos, id), username(name) {
+    setHealth(3);
+    lives = 3;
 }
+
 void Player::onCollision(Entity* other) {
     if (!other || !other->isActive()) return;
 
@@ -17,21 +18,26 @@ void Player::onCollision(Entity* other) {
 
 void Player::move(Vec2 dir) {
     if (isTopPlayer) {
-        // Top player slides left/right only
+        // Top player slides left/right along ceiling only
         velocity.x = dir.x;
         velocity.y = 0;
         position.x += velocity.x;
         clampPosition();
     } else {
-        // Bottom player moves horizontally
+        // Bottom player: horizontal movement + gravity/jump physics
+        const int GRAVITY = 1;
         velocity.x = dir.x;
-        position.x += velocity.x;
+        if (position.y < 19)   // only accumulate gravity when airborne
+            velocity.y += GRAVITY;
+        else
+            velocity.y = 0;    // reset when standing on the floor
+        position = position + velocity;
         clampPosition();
     }
 }
 
 std::unique_ptr<Entity> Player::shoot() {
-    // Shoots downward from ceiling
+    // Top player shoots downward from ceiling
     Vec2 bulletDir = {0, 1};
     return std::make_unique<Projectile>(getId() * 100 + 1, position, bulletDir, 1);
 }
